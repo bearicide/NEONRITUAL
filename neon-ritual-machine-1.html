@@ -1,0 +1,944 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Neon Ritual Machine — Auto Knob Sync</title>
+<style>
+  :root{color-scheme:dark}
+  html,body{margin:0;height:100%;overflow:hidden;background:#05060f;color:#eef;font-family:system-ui,ui-monospace,monospace}
+  canvas{display:block;width:100vw;height:100vh}
+
+  #gate{position:fixed;inset:0;display:grid;place-items:center;z-index:50;
+    background:radial-gradient(circle at 40% 25%,rgba(18,22,60,.92),rgba(5,6,15,.98))}
+  #gate .card{width:min(920px,92vw);border:1px solid rgba(255,255,255,.14);border-radius:16px;padding:16px;
+    background:rgba(0,0,0,.35);backdrop-filter:blur(12px)}
+  #gate h1{margin:0 0 8px;font-size:16px;letter-spacing:.12em;text-transform:uppercase}
+  #gate p{margin:0 0 12px;color:#aab;line-height:1.35;font-size:13px}
+  #gate button{padding:12px 14px;border-radius:12px;border:1px solid rgba(0,245,255,.55);
+    background:rgba(0,0,0,.35);color:#fff;font-weight:900;cursor:pointer;box-shadow:0 0 18px rgba(0,245,255,.2)}
+
+  #ui{position:fixed;left:10px;right:10px;bottom:10px;display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;z-index:20}
+  .panel{background:rgba(0,0,0,.35);border:1px solid rgba(255,255,255,.12);border-radius:14px;padding:8px;
+    backdrop-filter:blur(10px);box-shadow:0 14px 44px rgba(0,0,0,.55)}
+  .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+  button{padding:10px 12px;border-radius:12px;border:1px solid rgba(255,255,255,.18);
+    background:rgba(0,0,0,.42);color:#fff;font-weight:900;cursor:pointer;letter-spacing:.06em}
+  button:active{transform:translateY(1px)}
+  button.on{border-color:rgba(0,245,255,.55);box-shadow:0 0 18px rgba(0,245,255,.18)}
+  button.alt.on{border-color:rgba(181,107,255,.6);box-shadow:0 0 18px rgba(181,107,255,.16)}
+  .tiny{font-size:11px;color:#aab}
+
+  select{background:rgba(0,0,0,.35);color:#eef;border:1px solid rgba(255,255,255,.14);border-radius:12px;padding:9px 10px}
+
+  .knwrap{display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end}
+  .kn{width:66px;display:flex;flex-direction:column;align-items:center;gap:6px;user-select:none}
+  .cap{width:60px;height:60px;border-radius:50%;border:1px solid rgba(255,255,255,.18);
+    background:radial-gradient(circle at 30% 30%,rgba(255,255,255,.18),rgba(0,0,0,.6) 62%);
+    position:relative;cursor:ns-resize;--v:.5}
+  .cap:after{content:"";position:absolute;left:50%;top:50%;width:4px;height:24px;background:#00f5ff;border-radius:4px;
+    transform-origin:50% 90%;transform:translate(-50%,-90%) rotate(calc(-135deg + var(--v)*270deg));
+    box-shadow:0 0 14px rgba(0,245,255,.25)}
+  .lbl{font-size:11px;color:#aab;text-transform:uppercase;letter-spacing:.10em;text-align:center;cursor:pointer}
+  .lbl.learn{color:#fff;text-shadow:0 0 16px rgba(0,245,255,.35)}
+  .cc{font-size:11px;color:#889;text-align:center}
+
+  .pads{display:grid;grid-template-columns:repeat(4,minmax(90px,1fr));gap:8px;min-width:min(440px,92vw)}
+  .pad{padding:10px;border-radius:14px;border:1px solid rgba(255,255,255,.14);
+    background:linear-gradient(180deg,rgba(0,0,0,.28),rgba(0,0,0,.48));
+    font-size:12px;text-transform:uppercase;letter-spacing:.10em}
+  .pad.blue{border-color:rgba(0,245,255,.25);box-shadow:0 0 16px rgba(0,245,255,.12)}
+  .pad.purp{border-color:rgba(181,107,255,.25);box-shadow:0 0 16px rgba(181,107,255,.10)}
+  .pad.green{border-color:rgba(57,255,20,.18);box-shadow:0 0 16px rgba(57,255,20,.09)}
+  .pad.pink{border-color:rgba(255,43,214,.18);box-shadow:0 0 16px rgba(255,43,214,.09)}
+
+  #toast{position:fixed;top:12px;left:50%;transform:translateX(-50%);padding:8px 12px;border-radius:999px;
+    border:1px solid rgba(255,255,255,.12);background:rgba(0,0,0,.35);color:#aab;font-size:12px;opacity:0;
+    transition:opacity .18s ease;z-index:30}
+</style>
+</head>
+<body>
+
+<div id="gate">
+  <div class="card">
+    <h1>neon ritual machine — auto knob sync</h1>
+    <p>
+      Click START. DRONE is hold-to-play (release stops).<br>
+      <b>Hardware knobs auto-map:</b> CC21–CC28 → 8 screen knobs.<br>
+      If your controller uses different CCs, click a knob label to MIDI-Learn it.
+    </p>
+    <button id="startBtn">START</button>
+  </div>
+</div>
+
+<div id="toast"></div>
+<canvas id="cv"></canvas>
+<div id="ui"></div>
+
+<script>
+(() => {
+  const cv = document.getElementById("cv"), g = cv.getContext("2d");
+  const ui = document.getElementById("ui");
+  const toast = document.getElementById("toast");
+  const fit = () => { cv.width = innerWidth; cv.height = innerHeight; };
+  addEventListener("resize", fit); fit();
+
+  const say = (msg) => {
+    toast.textContent = msg;
+    toast.style.opacity = "1";
+    clearTimeout(say._t);
+    say._t = setTimeout(()=>toast.style.opacity="0", 900);
+  };
+
+  const clamp01 = v => Math.max(0, Math.min(1, v));
+  const rng = (a,b)=>a+Math.random()*(b-a);
+
+  // ---------- STATE ----------
+  const S = {
+    drive: 0.65,
+    time:  0.45,
+    chaos: 0.30,
+    space: 0.40,
+    taste: 0.45,
+    crush: 0.15,
+    gate:  0.10,
+    warp:  0.08,
+
+    mode: 0,          // 0 DRONE, 1 PULSE, 2 IMPACT
+    glitch: true,
+
+    midiOutOn: true,
+    midiThruOn: false,
+    knobOutOn: false, // off by default to avoid double-mapping
+    midiChannel: 1,
+    bend: 0
+  };
+
+  const KNOBS = [
+    {key:"drive", name:"drive"},
+    {key:"time",  name:"time"},
+    {key:"chaos", name:"chaos"},
+    {key:"space", name:"space"},
+    {key:"taste", name:"taste"},
+    {key:"crush", name:"crush"},
+    {key:"gate",  name:"gate"},
+    {key:"warp",  name:"warp"},
+  ];
+
+  // Auto mapping: CC21..28 -> knob order above
+  const AUTO_CC_START = 21;
+
+  // CC mapping (auto + learn override): cc -> key
+  const ccMap = new Map();
+  // Seed auto map
+  KNOBS.forEach((k, i) => ccMap.set(AUTO_CC_START + i, k.key));
+
+  let learnKey = null;
+  let lastCC = null, lastCCVal = null;
+
+  // ---------- AUDIO ----------
+  let ctx=null;
+  let pre, tone, shaper, post;
+  let delay, dWet, dFB;
+  let tremGain, tremOsc, tremDepth;
+  let ringMul, ringOsc, ringMix;
+  let crushNode=null, crushMix;
+  let comp, limiter, ana, scope;
+
+  const curve = (a)=>{ const n=2048,c=new Float32Array(n);
+    for(let i=0;i<n;i++){ const x=i/(n-1)*2-1; c[i]=Math.tanh(x*a); } return c; };
+
+  async function initAudio(){
+    ctx = new (AudioContext||webkitAudioContext)();
+
+    // Bitcrush via AudioWorklet (with fallback)
+    try{
+      const workletCode = `
+        class BitCrushProcessor extends AudioWorkletProcessor {
+          static get parameterDescriptors(){
+            return [
+              { name:"bits", defaultValue:12, minValue:2, maxValue:16, automationRate:"k-rate" },
+              { name:"down", defaultValue:1,  minValue:1, maxValue:32, automationRate:"k-rate" }
+            ];
+          }
+          constructor(){ super(); this._phase=0; this._last=0; }
+          process(inputs, outputs, params){
+            const input = inputs[0], output = outputs[0];
+            if(!input || input.length===0) return true;
+            const bits = (params.bits && params.bits.length) ? params.bits[0] : 12;
+            const down = (params.down && params.down.length) ? params.down[0] : 1;
+            const step = Math.pow(0.5, bits);
+            for(let c=0;c<input.length;c++){
+              const inp=input[c], out=output[c];
+              for(let i=0;i<inp.length;i++){
+                if(this._phase++ >= down){
+                  this._phase=0;
+                  this._last = step * Math.round(inp[i]/step);
+                }
+                out[i]=this._last;
+              }
+            }
+            return true;
+          }
+        }
+        registerProcessor("bitcrush", BitCrushProcessor);
+      `;
+      const blob = new Blob([workletCode], {type:"application/javascript"});
+      const url = URL.createObjectURL(blob);
+      await ctx.audioWorklet.addModule(url);
+      URL.revokeObjectURL(url);
+      crushNode = new AudioWorkletNode(ctx, "bitcrush");
+    }catch(e){
+      crushNode = null;
+      console.warn("bitcrush worklet unavailable:", e);
+    }
+
+    pre = ctx.createGain();
+    tone = ctx.createBiquadFilter(); tone.type = "lowpass";
+    shaper = ctx.createWaveShaper(); shaper.oversample = "4x";
+    post = ctx.createGain();
+
+    delay = ctx.createDelay(2.8);
+    dWet = ctx.createGain();
+    dFB  = ctx.createGain();
+    delay.connect(dFB).connect(delay);
+
+    tremGain = ctx.createGain(); tremGain.gain.value = 1.0;
+    tremOsc  = ctx.createOscillator(); tremOsc.type = "square";
+    tremDepth = ctx.createGain(); tremDepth.gain.value = 0.0;
+    tremOsc.connect(tremDepth).connect(tremGain.gain);
+    tremOsc.start();
+
+    ringMul = ctx.createGain(); ringMul.gain.value = 0.0;
+    ringOsc = ctx.createOscillator(); ringOsc.type="sine";
+    ringOsc.connect(ringMul.gain);
+    ringOsc.start();
+
+    ringMix = ctx.createGain(); ringMix.gain.value = 0.0;
+    crushMix = ctx.createGain(); crushMix.gain.value = 0.0;
+
+    comp = ctx.createDynamicsCompressor(); comp.attack.value=0.004; comp.release.value=0.12;
+    limiter = ctx.createDynamicsCompressor(); limiter.attack.value=0.002; limiter.release.value=0.10;
+
+    ana = ctx.createAnalyser(); ana.fftSize=512;
+    scope = ctx.createAnalyser(); scope.fftSize=2048;
+
+    // routing
+    pre.connect(tone).connect(shaper).connect(post);
+
+    post.connect(delay);
+    delay.connect(dWet).connect(comp);
+
+    post.connect(comp);       // dry
+    post.connect(tremGain);   // fx feed
+
+    tremGain.connect(ringMul).connect(ringMix).connect(comp);
+    if(crushNode){
+      tremGain.connect(crushNode).connect(crushMix).connect(comp);
+    }
+
+    comp.connect(limiter).connect(ctx.destination);
+    limiter.connect(ana);
+    limiter.connect(scope);
+
+    apply(true);
+  }
+
+  function apply(instant=false){
+    if(!ctx) return;
+    const t = ctx.currentTime;
+    const z = instant ? 0.001 : 0.05;
+
+    // DRIVE
+    shaper.curve = curve(6 + S.drive*30 + S.taste*8);
+    post.gain.setTargetAtTime(0.95 + S.drive*0.75, t, z);
+
+    comp.threshold.setTargetAtTime(-30 + S.drive*12, t, z);
+    comp.ratio.setTargetAtTime(8 + S.drive*6, t, z);
+
+    limiter.threshold.setTargetAtTime(-14 + S.drive*5, t, z);
+    limiter.ratio.setTargetAtTime(14, t, z);
+
+    // TIME + SPACE -> delay
+    delay.delayTime.setTargetAtTime(0.06 + S.time*0.62, t, z);
+    dWet.gain.setTargetAtTime(0.03 + S.space*0.62, t, z);
+    dFB.gain.setTargetAtTime(Math.min(0.92, 0.10 + S.space*0.78), t, z);
+
+    // tone
+    const base = [1200, 2200, 2600][S.mode] + S.taste*900 - S.crush*600;
+    tone.frequency.setTargetAtTime(base, t, z);
+    tone.Q.setTargetAtTime(0.7 + S.space*1.8 + S.chaos*2.2, t, z);
+
+    // GATE
+    const gateDepth = S.gate * 0.90;
+    tremGain.gain.setTargetAtTime(1.0 - gateDepth*0.70, t, z);
+    tremDepth.gain.setTargetAtTime(gateDepth, t, z);
+    tremOsc.frequency.setTargetAtTime(2 + S.time*18 + S.chaos*6, t, z);
+
+    // WARP
+    ringOsc.frequency.setTargetAtTime(18 + S.warp*420 + S.taste*40, t, z);
+    ringMix.gain.setTargetAtTime(S.warp*0.85, t, z);
+
+    // CRUSH
+    if(crushNode){
+      const bits = Math.round(16 - S.crush*13);
+      const down = Math.round(1 + S.crush*18);
+      crushNode.parameters.get("bits").setValueAtTime(bits, t);
+      crushNode.parameters.get("down").setValueAtTime(down, t);
+      crushMix.gain.setTargetAtTime(S.crush*0.95, t, z);
+    }else{
+      crushMix.gain.setTargetAtTime(0, t, z);
+    }
+  }
+
+  // ---------- VOICES ----------
+  const activePointer = new Map();
+  const heldMidi = new Map();
+  function midiToHz(m){ return 440 * Math.pow(2,(m-69)/12); }
+  function hzToMidi(hz){ return 69 + 12*Math.log2(hz/440); }
+
+  function chooseMidi(base){
+    const badChance = 0.08 + S.taste*0.78 + S.chaos*0.10;
+    if(Math.random() < badChance){
+      const opts=[6,-6,1,-1,7,-7,2,-2,11,-11];
+      return Math.round(base + opts[Math.floor(Math.random()*opts.length)] + (Math.random()*2-1)*2);
+    }
+    const scale=[0,2,3,5,7,10];
+    return Math.round(base + scale[Math.floor(Math.random()*scale.length)]);
+  }
+
+  function spawn(freq, vel=0.8){
+    if(!ctx) return null;
+    const t = ctx.currentTime;
+
+    const v = {released:false, o1:null, o2:null, g:null};
+    const o1 = ctx.createOscillator();
+    const o2 = ctx.createOscillator();
+    const g1 = ctx.createGain();
+    const g2 = ctx.createGain();
+    const amp = ctx.createGain();
+    const vf = ctx.createBiquadFilter(); vf.type="bandpass";
+
+    const bendSemis = S.bend * 2;
+    const det = (Math.random()*2-1) * S.chaos * 18;
+
+    const f1 = freq * Math.pow(2, det/1200) * Math.pow(2, bendSemis/12);
+    const f2 = f1 * (S.mode===0 ? rng(0.997,1.003) : rng(0.992,1.008));
+
+    o1.type = (S.mode===2) ? "square" : "sawtooth";
+    o2.type = (S.mode===0) ? "triangle" : "sine";
+    o1.frequency.setValueAtTime(f1, t);
+    o2.frequency.setValueAtTime(f2, t);
+
+    g1.gain.value = (S.mode===2) ? 0.60 : 0.72;
+    g2.gain.value = (S.mode===0) ? 0.46 : 0.26;
+
+    const bp = Math.min(6500, Math.max(140, freq * (S.mode===2 ? 2.2 : 1.4)));
+    vf.frequency.setValueAtTime(bp, t);
+    vf.Q.setValueAtTime(0.7 + S.chaos*4.0 + S.taste*2.2, t);
+
+    amp.gain.value = 0.0001;
+
+    o1.connect(g1).connect(vf);
+    o2.connect(g2).connect(vf);
+    vf.connect(amp).connect(pre);
+
+    o1.start(); o2.start();
+
+    const peak = (0.10 + vel*0.40) * (1.0 + S.drive*0.25);
+    const timeStretch = 0.70 + S.time*1.60;
+
+    if(S.mode===0){
+      amp.gain.exponentialRampToValueAtTime(peak, t + 0.10);
+    }else if(S.mode===1){
+      amp.gain.exponentialRampToValueAtTime(peak, t + 0.012);
+      amp.gain.exponentialRampToValueAtTime(0.0001, t + (0.10 + 0.22*timeStretch));
+      o1.stop(t + 0.90); o2.stop(t + 0.90);
+    }else{
+      amp.gain.exponentialRampToValueAtTime(peak, t + 0.008);
+      amp.gain.exponentialRampToValueAtTime(0.0001, t + (0.06 + 0.16*timeStretch));
+      o1.stop(t + 0.80); o2.stop(t + 0.80);
+    }
+
+    v.o1=o1; v.o2=o2; v.g=amp;
+    return v;
+  }
+
+  function release(v){
+    if(!v || v.released || !ctx) return;
+    v.released = true;
+    const t = ctx.currentTime;
+    const rel = 0.08 + S.time*0.55;
+
+    try{
+      v.g.gain.cancelScheduledValues(t);
+      const cur = Math.max(0.0002, v.g.gain.value || 0.001);
+      v.g.gain.setValueAtTime(cur, t);
+      v.g.gain.exponentialRampToValueAtTime(0.0001, t + rel);
+    }catch(_){}
+
+    const stopAt = t + rel + 0.05;
+    try{ v.o1.stop(stopAt); }catch(_){}
+    try{ v.o2.stop(stopAt); }catch(_){}
+  }
+
+  // ---------- MIDI I/O ----------
+  let midiAccess=null, midiIn=null, midiOut=null;
+
+  function chStatus(base){ return base + (Math.min(16,Math.max(1,S.midiChannel))-1); }
+  function sendOut(bytes){
+    if(!midiOut || !S.midiOutOn) return;
+    try{ midiOut.send(bytes); }catch(_){}
+  }
+  function outNoteOn(note, vel=110){ sendOut([chStatus(0x90), note&127, Math.min(127,Math.max(1,vel|0))]); }
+  function outNoteOff(note){ sendOut([chStatus(0x80), note&127, 0]); }
+  function outCC(cc, val){ sendOut([chStatus(0xB0), cc&127, Math.min(127,Math.max(0,val|0))]); }
+
+  function outPulse(note, vel=110, ms=120){
+    outNoteOn(note, vel);
+    setTimeout(()=>outNoteOff(note), ms);
+  }
+
+  function setKnobValue(key, val01, fromMIDI=false){
+    S[key] = clamp01(val01);
+    setKnobUI(key, S[key]);
+    apply();
+
+    if(!fromMIDI && S.knobOutOn){
+      // send the CC that currently controls this key (first match)
+      for(const [cc,k] of ccMap.entries()){
+        if(k===key){
+          outCC(cc, Math.round(S[key]*127));
+          break;
+        }
+      }
+    }
+  }
+
+  function onMIDI(ev){
+    const [st,d1,d2] = ev.data;
+    const cmd = st & 0xF0;
+
+    if(cmd===0x90 && d2>0){
+      const note = d1 & 127;
+      const vel01 = (d2 & 127)/127;
+
+      if(S.mode===0){
+        const v = spawn(midiToHz(note), 0.30 + vel01*0.75);
+        if(v) heldMidi.set(note, v);
+      }else{
+        spawn(midiToHz(note), 0.30 + vel01*0.75);
+      }
+
+      if(S.midiThruOn) outNoteOn(note, Math.round(vel01*127));
+      return;
+    }
+
+    if(cmd===0x80 || (cmd===0x90 && d2===0)){
+      const note = d1 & 127;
+      const v = heldMidi.get(note);
+      if(v){ heldMidi.delete(note); release(v); }
+      if(S.midiThruOn) outNoteOff(note);
+      return;
+    }
+
+    if(cmd===0xB0){
+      const cc = d1 & 127;
+      const val01 = (d2 & 127)/127;
+
+      lastCC = cc; lastCCVal = d2 & 127;
+      updateStatus();
+
+      // Learn mode: bind this CC to selected knob key
+      if(learnKey){
+        ccMap.set(cc, learnKey);
+        say(`learned CC${cc} → ${learnKey}`);
+        learnKey = null;
+        clearLearnHighlights();
+        refreshCCBadges();
+        return;
+      }
+
+      const key = ccMap.get(cc);
+      if(key){
+        setKnobValue(key, val01, true);
+        return;
+      }
+
+      if(S.midiThruOn) sendOut([chStatus(0xB0), cc, d2 & 127]);
+      return;
+    }
+
+    if(cmd===0xE0){
+      const v = ((d2<<7)|d1);
+      S.bend = (v - 8192)/8192;
+      if(S.midiThruOn) sendOut([chStatus(0xE0), d1&127, d2&127]);
+      return;
+    }
+  }
+
+  async function initMIDI(){
+    if(!navigator.requestMIDIAccess) return false;
+    try{
+      midiAccess = await navigator.requestMIDIAccess({sysex:false});
+      midiAccess.onstatechange = refreshPorts;
+      refreshPorts();
+      return true;
+    }catch(_){
+      return false;
+    }
+  }
+
+  // ---------- CANVAS PLAY ----------
+  function xyToFreq(x,y){
+    const min=55, max=1100;
+    const f = min * Math.pow(max/min, x);
+    if(ctx){
+      const cut = 260 + (1-y)*5600;
+      tone.frequency.setTargetAtTime(cut + S.taste*900, ctx.currentTime, 0.04);
+    }
+    return f;
+  }
+  function xyVel(y){ return 0.35 + y*0.65; }
+
+  let pointerDown=false;
+  function pointerStart(e){
+    pointerDown=true;
+    try{ cv.setPointerCapture(e.pointerId); }catch(_){}
+    const x = e.clientX/innerWidth, y = e.clientY/innerHeight;
+    const f = xyToFreq(x,y);
+    const v = xyVel(1-y);
+
+    if(S.mode===0){
+      const prev = activePointer.get(e.pointerId);
+      if(prev) release(prev);
+      const voice = spawn(f, v);
+      if(voice) activePointer.set(e.pointerId, voice);
+    }else{
+      spawn(f, v);
+    }
+  }
+  function pointerMove(e){
+    if(!pointerDown) return;
+    if(S.mode!==0) return;
+    const voice = activePointer.get(e.pointerId);
+    if(!voice || !ctx) return;
+    const x = e.clientX/innerWidth, y = e.clientY/innerHeight;
+    const f = xyToFreq(x,y);
+    try{
+      voice.o1.frequency.setTargetAtTime(f, ctx.currentTime, 0.04);
+      voice.o2.frequency.setTargetAtTime(f*0.997, ctx.currentTime, 0.05);
+    }catch(_){}
+  }
+  function pointerEnd(e){
+    pointerDown=false;
+    try{ cv.releasePointerCapture(e.pointerId); }catch(_){}
+    const voice = activePointer.get(e.pointerId);
+    if(voice){ activePointer.delete(e.pointerId); release(voice); }
+  }
+
+  // ---------- ROLLERS / PADS ----------
+  function currentBaseMidi(){
+    for(const v of activePointer.values()){
+      try{ return hzToMidi(v.o1.frequency.value || 220); }catch(_){}
+      break;
+    }
+    return 60;
+  }
+  function rollerNote(midi, vel=118, ms=120){
+    const hz = midiToHz(midi);
+    const prevMode = S.mode;
+    S.mode = 2; apply();
+    spawn(hz, 0.72);
+    S.mode = prevMode; apply();
+    outPulse(midi, vel, ms);
+  }
+
+  const actions = {
+    roll(){
+      const base = currentBaseMidi();
+      const steps = 22 + Math.floor(S.drive*10);
+      const gap = 30 - (S.chaos*10);
+      for(let i=0;i<steps;i++){
+        setTimeout(()=>rollerNote(chooseMidi(base + i*0.6), 118, 120), i*gap);
+      }
+      say("roll");
+    },
+    arp(){
+      const base = currentBaseMidi();
+      const steps = 18 + Math.floor(S.time*20);
+      const gap = 34 - (S.chaos*12);
+      for(let i=0;i<steps;i++){
+        setTimeout(()=>rollerNote(chooseMidi(base + i*0.8), 112, 110), i*gap);
+      }
+      say("arp");
+    },
+    cluster(){
+      const base = currentBaseMidi();
+      const n = 4 + Math.floor(S.taste*7);
+      for(let i=0;i<n;i++) rollerNote(chooseMidi(base + (Math.random()*6-3)), 124, 160);
+      say("cluster");
+    },
+    wreck(){
+      const base = currentBaseMidi();
+      const steps = 46 + Math.floor(S.drive*16);
+      const gap = 16 - (S.chaos*7);
+      for(let i=0;i<steps;i++){
+        setTimeout(()=>rollerNote(chooseMidi(base + (Math.random()*18-9)), 126, 90), i*gap);
+      }
+      setTimeout(()=>actions.resolve(), steps*gap + 120);
+      say("wreck");
+    },
+    resolve(){
+      [0,3,7,12].forEach((d,i)=>setTimeout(()=>rollerNote(60+d, 120, 220), i*55));
+      say("resolve");
+    },
+    modeFlip(){
+      if(S.mode===0){
+        for(const v of activePointer.values()) release(v);
+        activePointer.clear();
+      }
+      S.mode = (S.mode+1)%3;
+      apply();
+      modeBtn.textContent = "MODE: " + ["DRONE","PULSE","IMPACT"][S.mode];
+      say(["drone","pulse","impact"][S.mode]);
+    },
+    glitch(){
+      S.glitch = !S.glitch;
+      glitchBtn.classList.toggle("on", S.glitch);
+      say(S.glitch ? "glitch" : "clean");
+    },
+    clearAir(){
+      if(!ctx) return;
+      const t = ctx.currentTime;
+      dWet.gain.setTargetAtTime(0.0001, t, 0.02);
+      dFB.gain.setTargetAtTime(0.0001, t, 0.02);
+      setTimeout(()=>apply(), 520);
+      say("clear");
+    }
+  };
+
+  // ---------- VISUALS ----------
+  function draw(){
+    requestAnimationFrame(draw);
+    g.clearRect(0,0,cv.width,cv.height);
+    if(!ctx) return;
+
+    const spec = new Uint8Array(ana.frequencyBinCount);
+    const wav  = new Uint8Array(scope.fftSize);
+    ana.getByteFrequencyData(spec);
+    scope.getByteTimeDomainData(wav);
+
+    g.fillStyle = "rgba(0,0,0,.25)";
+    g.fillRect(0,0,cv.width,cv.height);
+
+    const count = Math.min(220, spec.length);
+    const barW = Math.max(2, Math.floor(cv.width/(count*1.25)));
+    const baseY = cv.height*0.64;
+    const hMax = cv.height*(0.26 + S.drive*0.14 + S.crush*0.06);
+
+    const col = S.mode===0 ? "rgba(0,245,255,.70)" : S.mode===1 ? "rgba(181,107,255,.65)" : "rgba(57,255,20,.58)";
+    g.globalCompositeOperation = "lighter";
+    for(let i=0;i<count;i++){
+      const v = spec[i]/255;
+      const h = v*hMax;
+      g.fillStyle = col;
+      g.fillRect(16 + i*(barW+1), baseY - h, barW, h);
+    }
+
+    g.lineWidth = 2 + S.space*1.6 + S.warp*0.8;
+    g.strokeStyle = "rgba(255,43,214,.42)";
+    g.beginPath();
+    for(let i=0;i<wav.length;i++){
+      const x = (i/(wav.length-1))*cv.width;
+      const y = cv.height*0.30 + ((wav[i]-128)/128) * (cv.height*(0.11 + S.space*0.05));
+      i?g.lineTo(x,y):g.moveTo(x,y);
+    }
+    g.stroke();
+
+    if(S.glitch){
+      const chance = 0.04 + S.taste*0.14 + S.chaos*0.14 + S.crush*0.10;
+      if(Math.random()<chance){
+        const slices = 1 + Math.floor(S.taste*6);
+        for(let i=0;i<slices;i++){
+          const y = Math.floor(rng(0,cv.height));
+          const h = Math.floor(rng(10,56));
+          const dx = Math.floor(rng(-70,70)*(1+S.chaos*1.6));
+          g.drawImage(cv, 0,y,cv.width,h, dx,y,cv.width,h);
+        }
+      }
+    }
+    g.globalCompositeOperation = "source-over";
+  }
+
+  // ---------- UI ----------
+  const el = (tag, props={}, kids=[])=>{
+    const n=document.createElement(tag);
+    for(const [k,v] of Object.entries(props)){
+      if(k==="class") n.className=v;
+      else if(k==="text") n.textContent=v;
+      else if(k.startsWith("on")) n.addEventListener(k.slice(2), v);
+      else n.setAttribute(k,v);
+    }
+    kids.forEach(c=>n.appendChild(c));
+    return n;
+  };
+
+  const knobCaps = new Map();
+  const knobLbls = new Map();
+  const knobCCs  = new Map();
+
+  function setKnobUI(key, val){
+    const cap = knobCaps.get(key);
+    if(cap) cap.style.setProperty("--v", String(clamp01(val)));
+  }
+
+  function clearLearnHighlights(){
+    for(const lbl of knobLbls.values()) lbl.classList.remove("learn");
+  }
+
+  function refreshCCBadges(){
+    // show first CC that maps to each key (there might be multiple; we show one)
+    for(const {key} of KNOBS){
+      let ccTxt = "--";
+      for(const [cc,k] of ccMap.entries()){
+        if(k===key){ ccTxt = String(cc); break; }
+      }
+      const elCC = knobCCs.get(key);
+      if(elCC) elCC.textContent = "cc" + ccTxt;
+    }
+  }
+
+  function makeKnob({key,name}){
+    let v = S[key];
+
+    const cap = el("div",{class:"cap"});
+    cap.style.setProperty("--v", v);
+    knobCaps.set(key, cap);
+
+    const lbl = el("div",{class:"lbl", text:name});
+    knobLbls.set(key, lbl);
+
+    const cc = el("div",{class:"cc", text:"cc--"});
+    knobCCs.set(key, cc);
+
+    lbl.onclick = () => {
+      learnKey = key;
+      clearLearnHighlights();
+      lbl.classList.add("learn");
+      say(`learn: move hardware knob for ${key}`);
+      updateStatus();
+    };
+
+    let sy=0, sv=0;
+    cap.addEventListener("pointerdown", e=>{
+      cap.setPointerCapture(e.pointerId);
+      sy=e.clientY; sv=v;
+      ctx && ctx.resume();
+    });
+    cap.addEventListener("pointermove", e=>{
+      if(!cap.hasPointerCapture(e.pointerId)) return;
+      v = clamp01(sv + (sy - e.clientY)/170);
+      setKnobValue(key, v, false);
+    });
+    cap.addEventListener("pointerup", e=>cap.releasePointerCapture(e.pointerId));
+
+    return el("div",{class:"kn"},[cap,lbl,cc]);
+  }
+
+  let modeBtn, glitchBtn, statusLine;
+
+  function updateStatus(){
+    const ccText = (lastCC==null) ? "CC—" : `CC${lastCC}=${lastCCVal}`;
+    const learnText = learnKey ? ` | learn:${learnKey}` : "";
+    statusLine.textContent = `knobs auto: CC21–28 | last: ${ccText}${learnText}`;
+  }
+
+  function makeUI(){
+    modeBtn = el("button",{text:"MODE: DRONE", onclick:actions.modeFlip});
+    glitchBtn = el("button",{class:"alt on", text:"GLITCH", onclick:actions.glitch});
+
+    const outBtn = el("button",{text:"MIDI OUT", onclick:()=>{ S.midiOutOn=!S.midiOutOn; outBtn.classList.toggle("on",S.midiOutOn); }});
+    outBtn.classList.toggle("on", S.midiOutOn);
+
+    const thruBtn = el("button",{text:"THRU", onclick:()=>{ S.midiThruOn=!S.midiThruOn; thruBtn.classList.toggle("on",S.midiThruOn); }});
+    thruBtn.classList.toggle("on", S.midiThruOn);
+
+    const knobOutBtn = el("button",{text:"KNOB OUT", onclick:()=>{ S.knobOutOn=!S.knobOutOn; knobOutBtn.classList.toggle("on",S.knobOutOn); }});
+    knobOutBtn.classList.toggle("on", S.knobOutOn);
+
+    const resetBtn = el("button",{text:"RESET MAP", onclick:()=>{
+      ccMap.clear();
+      KNOBS.forEach((k,i)=>ccMap.set(AUTO_CC_START+i, k.key));
+      refreshCCBadges();
+      say("reset to CC21–28");
+      updateStatus();
+    }});
+
+    statusLine = el("span",{class:"tiny", text:""});
+    updateStatus();
+
+    const top = el("div",{class:"panel"},[
+      el("div",{class:"row"},[modeBtn, glitchBtn, outBtn, thruBtn, knobOutBtn, resetBtn, statusLine]),
+      el("div",{class:"tiny", text:"Click a knob label to learn. Otherwise: hardware CC21–28 drives the 8 knobs automatically."})
+    ]);
+
+    const knobPanel = el("div",{class:"panel"},[
+      el("div",{class:"knwrap"}, KNOBS.map(makeKnob))
+    ]);
+
+    const pads = el("div",{class:"panel"},[
+      el("div",{class:"pads"},[
+        el("button",{class:"pad blue", text:"ROLL", onclick:actions.roll}),
+        el("button",{class:"pad purp", text:"ARP", onclick:actions.arp}),
+        el("button",{class:"pad pink", text:"CLUSTER", onclick:actions.cluster}),
+        el("button",{class:"pad green", text:"WRECK", onclick:actions.wreck}),
+        el("button",{class:"pad purp", text:"RESOLVE", onclick:actions.resolve}),
+        el("button",{class:"pad blue", text:"MODE FLIP", onclick:actions.modeFlip}),
+        el("button",{class:"pad pink", text:"GLITCH", onclick:actions.glitch}),
+        el("button",{class:"pad green", text:"CLEAR AIR", onclick:actions.clearAir}),
+      ])
+    ]);
+
+    const midiPanel = makeMIDIBox();
+
+    ui.appendChild(top);
+    ui.appendChild(knobPanel);
+    ui.appendChild(pads);
+    ui.appendChild(midiPanel);
+
+    refreshCCBadges();
+  }
+
+  function makeMIDIBox(){
+    const inSel = el("select",{});
+    const outSel = el("select",{});
+    const chSel = el("select",{});
+    for(let i=1;i<=16;i++) chSel.appendChild(el("option",{value:String(i), text:String(i)}));
+    chSel.value = String(S.midiChannel);
+    chSel.onchange = ()=>{ S.midiChannel = parseInt(chSel.value,10)||1; };
+
+    function fillPorts(){
+      if(!midiAccess) return;
+      const prevIn=inSel.value, prevOut=outSel.value;
+      inSel.innerHTML=""; outSel.innerHTML="";
+      inSel.appendChild(el("option",{value:"", text:"midi in: (none)"}));
+      outSel.appendChild(el("option",{value:"", text:"midi out: (none)"}));
+
+      for(const input of midiAccess.inputs.values()){
+        inSel.appendChild(el("option",{value:input.id, text:input.name||input.id}));
+      }
+      for(const output of midiAccess.outputs.values()){
+        outSel.appendChild(el("option",{value:output.id, text:output.name||output.id}));
+      }
+
+      if(prevIn && midiAccess.inputs.get(prevIn)) inSel.value=prevIn;
+      if(prevOut && midiAccess.outputs.get(prevOut)) outSel.value=prevOut;
+
+      if(!inSel.value){
+        const first=[...midiAccess.inputs.values()][0];
+        if(first) inSel.value=first.id;
+      }
+      if(!outSel.value){
+        const first=[...midiAccess.outputs.values()][0];
+        if(first) outSel.value=first.id;
+      }
+
+      inSel.onchange();
+      outSel.onchange();
+    }
+
+    inSel.onchange = ()=>{
+      const id=inSel.value;
+      if(midiIn) midiIn.onmidimessage=null;
+      midiIn = (id && midiAccess) ? midiAccess.inputs.get(id) : null;
+      if(midiIn) midiIn.onmidimessage = onMIDI;
+      say(midiIn ? "midi in connected" : "no midi in");
+    };
+
+    outSel.onchange = ()=>{
+      const id=outSel.value;
+      midiOut = (id && midiAccess) ? midiAccess.outputs.get(id) : null;
+      say(midiOut ? "midi out connected" : "no midi out");
+    };
+
+    makeMIDIBox._fillPorts = fillPorts;
+
+    return el("div",{class:"panel"},[
+      el("div",{class:"row"},[inSel, outSel, el("span",{class:"tiny", text:"ch"}), chSel]),
+      el("div",{class:"tiny", text:"Ableton: enable Track for this output port. Use Remote if you want to MIDI-map CCs."})
+    ]);
+  }
+
+  function refreshPorts(){
+    if(makeMIDIBox._fillPorts) makeMIDIBox._fillPorts();
+  }
+
+  // ---------- START / RUN ----------
+  let started=false;
+
+  document.getElementById("startBtn").onclick = async () => {
+    if(started) return;
+    started=true;
+
+    await initAudio();
+    try{ await ctx.resume(); }catch(_){}
+
+    // canvas events
+    cv.addEventListener("pointerdown", (e)=>{ ctx.resume(); pointerStart(e); });
+    cv.addEventListener("pointermove", pointerMove);
+    cv.addEventListener("pointerup", pointerEnd);
+    cv.addEventListener("pointercancel", pointerEnd);
+
+    // build UI
+    document.getElementById("gate").style.display="none";
+    makeUI();
+
+    // init MIDI
+    const ok = await initMIDI();
+    if(ok){ say("armed + midi"); }
+    else { say("armed (midi blocked/unavailable)"); }
+
+    apply(true);
+    requestAnimationFrame(draw);
+  };
+
+  // pointer functions need access to voice state
+  function pointerStart(e){
+    pointerDown=true;
+    try{ cv.setPointerCapture(e.pointerId); }catch(_){}
+    const x = e.clientX/innerWidth, y = e.clientY/innerHeight;
+    const f = xyToFreq(x,y);
+    const v = xyVel(1-y);
+
+    if(S.mode===0){
+      const prev = activePointer.get(e.pointerId);
+      if(prev) release(prev);
+      const voice = spawn(f, v);
+      if(voice) activePointer.set(e.pointerId, voice);
+    }else{
+      spawn(f, v);
+    }
+  }
+  function pointerMove(e){
+    if(!pointerDown) return;
+    if(S.mode!==0) return;
+    const voice = activePointer.get(e.pointerId);
+    if(!voice || !ctx) return;
+    const x = e.clientX/innerWidth, y = e.clientY/innerHeight;
+    const f = xyToFreq(x,y);
+    try{
+      voice.o1.frequency.setTargetAtTime(f, ctx.currentTime, 0.04);
+      voice.o2.frequency.setTargetAtTime(f*0.997, ctx.currentTime, 0.05);
+    }catch(_){}
+  }
+  function pointerEnd(e){
+    pointerDown=false;
+    try{ cv.releasePointerCapture(e.pointerId); }catch(_){}
+    const voice = activePointer.get(e.pointerId);
+    if(voice){ activePointer.delete(e.pointerId); release(voice); }
+  }
+})();
+</script>
+</body>
+</html>
